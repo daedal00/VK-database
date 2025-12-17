@@ -5,8 +5,8 @@
 ```mysql
 CREATE TABLE users (
     user_id INT NOT NULL AUTO_INCREMENT,
-    full_name VARCHAR(50),
-    email VARCHAR(50) UNIQUE,
+    full_name VARCHAR(50) NOT NULL,
+    email VARCHAR(50) NOT NULL UNIQUE,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -18,8 +18,8 @@ CREATE TABLE users (
 ```mysql
 CREATE TABLE venues (
     venue_id INT NOT NULL AUTO_INCREMENT,
-    name VARCHAR(50),
-    city VARCHAR(50),
+    name VARCHAR(50) NOT NULL,
+    city VARCHAR(50) NOT NULL,
     state VARCHAR(50),
     country VARCHAR(2),
     capacity INT,
@@ -37,7 +37,7 @@ CREATE TABLE events (
     event_id INT NOT NULL AUTO_INCREMENT,
     start_time TIMESTAMP NOT NULL,
     end_time TIMESTAMP NULL,
-    name VARCHAR(100),
+    name VARCHAR(100) NOT NULL,
     venue_id INT NOT NULL,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -55,8 +55,8 @@ CREATE TABLE ticket_listings (
     seller_user_id INT NOT NULL,
     seat_info VARCHAR(25),
     listed_price DECIMAL(10, 2) NOT NULL,
-    status VARCHAR(15),
-    currency VARCHAR(3),
+    status VARCHAR(15) NOT NULL,
+    currency VARCHAR(3) NOT NULL,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -64,7 +64,8 @@ CREATE TABLE ticket_listings (
     PRIMARY KEY (ticket_listing_id),
     FOREIGN KEY (event_id) REFERENCES events(event_id),
     FOREIGN KEY (seller_user_id) REFERENCES users(user_id),
-    CHECK (listed_price > 0)
+    CHECK (listed_price > 0),
+    CHECK (status IN ('active', 'sold', 'cancelled', 'expired'))
 );
 ```
 
@@ -72,13 +73,14 @@ CREATE TABLE ticket_listings (
 CREATE TABLE orders (
     order_id INT NOT NULL AUTO_INCREMENT,
     buyer_user_id INT NOT NULL,
-    status VARCHAR(15),
+    status VARCHAR(15) NOT NULL,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
     PRIMARY KEY (order_id),
-    FOREIGN KEY (buyer_user_id) REFERENCES users(user_id)
+    FOREIGN KEY (buyer_user_id) REFERENCES users(user_id),
+    CHECK (status IN ('pending', 'paid', 'cancelled'))
 );
 ```
 
@@ -95,7 +97,8 @@ CREATE TABLE order_items (
 
     PRIMARY KEY (order_item_id),
     FOREIGN KEY (order_id) REFERENCES orders(order_id),
-    FOREIGN KEY (ticket_listing_id) REFERENCES ticket_listings(ticket_listing_id)
+    FOREIGN KEY (ticket_listing_id) REFERENCES ticket_listings(ticket_listing_id),
+    CHECK (quantity > 0)
 );
 ```
 
@@ -119,6 +122,18 @@ CREATE INDEX city_events
 ON venues(city)
 ```
 
+```mysql
+-- supports joins and aggregates on order items by order
+CREATE INDEX order_items_order_id
+ON order_items(order_id);
+```
+
+```mysql
+-- supports joins from order_items back to listings
+CREATE INDEX order_items_listing_id
+ON order_items(ticket_listing_id);
+```
+
 ## Part 2 - Queries
 
 ### active listings for an event
@@ -126,29 +141,34 @@ ON venues(city)
 ```mysql
 SELECT ticket_listing_id, seller_user_id, seat_info, listed_price
 FROM ticket_listings
-WHERE ticket_event_id=`event_id`
-AND status="active"
-ORDER BY listed_price ASC
+WHERE event_id = ? -- bind the target event_id
+  AND status = 'active'
+ORDER BY listed_price ASC;
 ```
 
 ### top 5 events by total resale revenue over last 30 days
 
 ```mysql
-SELECT events.event_id, events.name, venues.name, SUM(order_items.unit_price_at_sale * order_items.quantity) AS revenue
+SELECT e.event_id,
+       e.name AS event_name,
+       v.name AS venue_name,
+       SUM(oi.unit_price_at_sale * oi.quantity) AS revenue
 
-FROM order_items
+FROM order_items oi
 
-INNER JOIN orders ON orders.order_id=order_items.order_id
-INNER JOIN ticket_listings ON order_items.ticket_listing_id=ticket_listings.ticket_listing_id
-INNER JOIN events ON events.event_id=ticket_listings.event_id
-INNER JOIN venues ON venues.venue_id=events.venue_id
+INNER JOIN orders o ON o.order_id = oi.order_id
+INNER JOIN ticket_listings tl ON oi.ticket_listing_id = tl.ticket_listing_id
+INNER JOIN events e ON e.event_id = tl.event_id
+INNER JOIN venues v ON v.venue_id = e.venue_id
 
-WHERE orders.created_at > NOW() - INTERVAL 30 DAY
+WHERE o.created_at > NOW() - INTERVAL 30 DAY
+  AND o.status = 'paid'
+  AND tl.status IN ('sold', 'expired') -- sold/consumed listings only
 
-GROUP BY events.event_id, events.name, venues.name
+GROUP BY e.event_id, e.name, v.name
 
 ORDER BY revenue DESC
-LIMIT 5
+LIMIT 5;
 ```
 
 ### inactive buyers
